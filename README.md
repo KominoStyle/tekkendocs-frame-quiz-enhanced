@@ -20,7 +20,7 @@ Install a userscript manager such as Tampermonkey.
 
 ### Install from GitHub
 
-[Install userscript](https://raw.githubusercontent.com/YOUR-GITHUB-NAME/tekkendocs-frame-quiz-enhanced/main/tekkendocs-frame-quiz-enhanced.user.js)
+[Install userscript](https://raw.githubusercontent.com/KominoStyle/tekkendocs-frame-quiz-enhanced/main/tekkendocs-frame-quiz-enhanced.user.js)
 
 Then confirm the installation in Tampermonkey.
 
