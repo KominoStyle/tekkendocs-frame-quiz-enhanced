@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TekkenDocs Frame Quiz Enhanced
 // @namespace    https://github.com/KominoStyle
-// @version      1.0.0
+// @version      1.0.1
 // @description  Enhances the TekkenDocs Tekken 8 Frame Quiz with precise block-frame answers, configurable safe-frame ranges and automatic progression.
 // @namespace    !♥Koͨmͧiͭnͥoͤ Style♥!
 // @license      MIT
@@ -27,8 +27,11 @@
     const CORRECT_FEEDBACK_MS = 850;
     const WRONG_FEEDBACK_MS = 1600;
 
-    const STORAGE_KEY =
+    const SAFE_MODE_STORAGE_KEY =
         'kominoTekkenDocsSafeFrameMode';
+
+    const DAILY_STORAGE_PREFIX =
+        'kominoTekkenDocsDailyExactAnswers:v1:';
 
     const SAFE_MODES = {
         GROUPED: 'grouped',
@@ -48,6 +51,13 @@
         [SAFE_MODES.EXACT]: 'Exact',
     };
 
+    /*
+     * Original TekkenDocs answer buckets.
+     *
+     * These remain alive in the background because TekkenDocs'
+     * own React handlers still control score, streak, Daily
+     * Challenge persistence and progression.
+     */
     const ORIGINAL_LABELS = [
         '+1 or more',
         '0 to -9',
@@ -61,11 +71,14 @@
     // ============================================================
 
     let safeMode =
-        localStorage.getItem(STORAGE_KEY) ||
+        localStorage.getItem(
+            SAFE_MODE_STORAGE_KEY,
+        ) ||
         SAFE_MODES.GROUPED;
 
     if (!SAFE_MODE_ORDER.includes(safeMode)) {
-        safeMode = SAFE_MODES.GROUPED;
+        safeMode =
+            SAFE_MODES.GROUPED;
     }
 
     let portal = null;
@@ -85,15 +98,6 @@
     let lastKnownUrl =
         location.href;
 
-    /*
-     * Current quiz video.
-     *
-     * While answering:
-     * loop = false
-     *
-     * On next question:
-     * loop = true again
-     */
     let currentQuizVideo = null;
 
     const processedFeedback =
@@ -103,7 +107,7 @@
         new WeakMap();
 
     // ============================================================
-    // ROUTE DETECTION
+    // ROUTES
     // ============================================================
 
     function isFrameQuizRoute() {
@@ -112,37 +116,389 @@
         );
     }
 
+    function isDailyChallengeRoute() {
+        return /^\/t8\/dailychallenge\/?$/.test(
+            location.pathname,
+        );
+    }
+
+    function isSupportedQuizRoute() {
+        return (
+            isFrameQuizRoute() ||
+            isDailyChallengeRoute()
+        );
+    }
+
+    // ============================================================
+    // DAILY CHALLENGE STORAGE
+    // ============================================================
+
+    function getLocalDateKey() {
+        const date =
+            new Date();
+
+        const year =
+            date.getFullYear();
+
+        const month =
+            String(
+                date.getMonth() + 1,
+            ).padStart(
+                2,
+                '0',
+            );
+
+        const day =
+            String(
+                date.getDate(),
+            ).padStart(
+                2,
+                '0',
+            );
+
+        return `${year}-${month}-${day}`;
+    }
+
+    function getDailyStorageKey() {
+        return (
+            DAILY_STORAGE_PREFIX +
+            getLocalDateKey()
+        );
+    }
+
+    function getEmptyDailyData() {
+        return {
+            dateKey:
+                getLocalDateKey(),
+
+            answers: {},
+        };
+    }
+
+    function loadDailyData() {
+        try {
+            const raw =
+                localStorage.getItem(
+                    getDailyStorageKey(),
+                );
+
+            if (!raw) {
+                return getEmptyDailyData();
+            }
+
+            const parsed =
+                JSON.parse(raw);
+
+            if (
+                !parsed ||
+                typeof parsed !==
+                    'object' ||
+                typeof parsed.answers !==
+                    'object'
+            ) {
+                return getEmptyDailyData();
+            }
+
+            return parsed;
+        } catch {
+            return getEmptyDailyData();
+        }
+    }
+
+    function saveDailyData(data) {
+        localStorage.setItem(
+            getDailyStorageKey(),
+            JSON.stringify(data),
+        );
+    }
+
+    function clearDailyData() {
+        localStorage.removeItem(
+            getDailyStorageKey(),
+        );
+    }
+
+    // ============================================================
+    // DAILY QUESTION NUMBER
+    // ============================================================
+
+    function getDailyQuestionIndex() {
+        if (!isDailyChallengeRoute()) {
+            return null;
+        }
+
+        const paragraphs =
+            Array.from(
+                document.querySelectorAll(
+                    'p',
+                ),
+            );
+
+        for (
+            const paragraph of paragraphs
+        ) {
+            const text =
+                paragraph.textContent
+                    ?.trim();
+
+            if (!text) {
+                continue;
+            }
+
+            const match =
+                text.match(
+                    /^Question\s+(\d+)\s*\/\s*10$/i,
+                );
+
+            if (!match) {
+                continue;
+            }
+
+            const number =
+                Number(match[1]);
+
+            if (
+                Number.isInteger(number) &&
+                number >= 1 &&
+                number <= 10
+            ) {
+                return number - 1;
+            }
+        }
+
+        return null;
+    }
+
+    function saveDailyExactAnswer(
+        question,
+        selectedLabel,
+        isCorrect,
+    ) {
+        if (!isDailyChallengeRoute()) {
+            return;
+        }
+
+        const data =
+            loadDailyData();
+
+        let index =
+            getDailyQuestionIndex();
+
+        /*
+         * Fallback:
+         * if the Question x / 10 text could not be found, try
+         * finding an already-known question with this move ID.
+         */
+        if (index === null) {
+            const existing =
+                Object.entries(
+                    data.answers,
+                ).find(
+                    ([, answer]) =>
+                        answer?.moveId ===
+                        question.id,
+                );
+
+            if (existing) {
+                index =
+                    Number(
+                        existing[0],
+                    );
+            }
+        }
+
+        /*
+         * Last fallback:
+         * choose the first unused answer position.
+         */
+        if (
+            index === null ||
+            !Number.isInteger(index)
+        ) {
+            for (
+                let candidate = 0;
+                candidate < 10;
+                candidate += 1
+            ) {
+                if (
+                    !data.answers[
+                        String(candidate)
+                    ]
+                ) {
+                    index =
+                        candidate;
+
+                    break;
+                }
+            }
+        }
+
+        if (
+            index === null ||
+            !Number.isInteger(index)
+        ) {
+            return;
+        }
+
+        data.answers[
+            String(index)
+        ] = {
+            moveId:
+                question.id,
+
+            command:
+                question.move
+                    ?.command ||
+                '',
+
+            selectedLabel,
+
+            rawBlock:
+                question.move
+                    ?.block ||
+                String(
+                    question.blockValue,
+                ),
+
+            isCorrect:
+                Boolean(
+                    isCorrect,
+                ),
+        };
+
+        saveDailyData(
+            data,
+        );
+    }
+
+    // ============================================================
+    // DAILY RESULT REWRITE
+    // ============================================================
+
+    function rewriteDailyResults() {
+        if (!isDailyChallengeRoute()) {
+            return;
+        }
+
+        const data =
+            loadDailyData();
+
+        for (
+            let index = 0;
+            index < 10;
+            index += 1
+        ) {
+            const storedAnswer =
+                data.answers[
+                    String(index)
+                ];
+
+            if (!storedAnswer) {
+                continue;
+            }
+
+            const card =
+                document.getElementById(
+                    `answer-details-${index + 1}`,
+                );
+
+            if (!card) {
+                continue;
+            }
+
+            /*
+             * AnswerDetailsCard currently renders:
+             *
+             * <p>You picked</p>
+             * <p>-12 to -14</p>
+             *
+             * Replace only the value underneath it.
+             */
+            const label =
+                Array.from(
+                    card.querySelectorAll(
+                        'p',
+                    ),
+                ).find(
+                    element =>
+                        element.textContent
+                            ?.trim() ===
+                        'You picked',
+                );
+
+            if (!label) {
+                continue;
+            }
+
+            const value =
+                label.nextElementSibling;
+
+            if (
+                !(value instanceof HTMLElement)
+            ) {
+                continue;
+            }
+
+            if (
+                value.textContent
+                    ?.trim() ===
+                storedAnswer.selectedLabel
+            ) {
+                continue;
+            }
+
+            value.textContent =
+                storedAnswer.selectedLabel;
+        }
+    }
+
+    function isDailyResultView() {
+        return Boolean(
+            document.getElementById(
+                'answer-details-1',
+            ),
+        );
+    }
+
+    // ============================================================
+    // SPA NAVIGATION
+    // ============================================================
+
     function handleLocationChange() {
         const newUrl =
             location.href;
 
-        if (newUrl === lastKnownUrl) {
+        if (
+            newUrl ===
+            lastKnownUrl
+        ) {
             return;
         }
 
         lastKnownUrl =
             newUrl;
 
-        if (isFrameQuizRoute()) {
+        if (
+            isSupportedQuizRoute()
+        ) {
             queueProcessPage();
+
             return;
         }
 
         cleanup();
     }
 
-    // ============================================================
-    // SPA NAVIGATION WATCHER
-    // ============================================================
-
     function installNavigationWatcher() {
         if (
-            window.__ksFrameQuizNavigationWatcher
+            window
+                .__ksFrameQuizNavigationWatcher
         ) {
             return;
         }
 
-        window.__ksFrameQuizNavigationWatcher =
+        window
+            .__ksFrameQuizNavigationWatcher =
             true;
 
         const originalPushState =
@@ -214,7 +570,9 @@
             ?.remove();
 
         const style =
-            document.createElement('style');
+            document.createElement(
+                'style',
+            );
 
         style.id =
             'ks-framequiz-style';
@@ -222,60 +580,44 @@
         style.textContent = `
             #ks-framequiz-portal {
                 position: fixed;
-
                 z-index: 1000;
-
                 box-sizing: border-box;
-
                 margin: 0;
                 padding: 0;
-
                 pointer-events: auto;
             }
 
             .ks-framequiz-toolbar {
                 display: flex;
-
                 align-items: center;
                 justify-content: space-between;
-
                 flex-wrap: wrap;
-
                 gap: 8px;
-
                 margin-bottom: 10px;
             }
 
             .ks-framequiz-toolbar-left {
                 display: flex;
-
                 align-items: center;
-
                 flex-wrap: wrap;
-
                 gap: 8px;
             }
 
             .ks-framequiz-info {
                 font-size: 12px;
-
                 opacity: 0.72;
             }
 
             .ks-framequiz-grid {
                 display: grid;
-
                 grid-template-columns:
                     repeat(4, minmax(0, 1fr));
-
                 gap: 8px;
-
                 width: 100%;
             }
 
             .ks-framequiz-answer {
                 width: 100% !important;
-
                 min-width: 0 !important;
                 max-width: none !important;
 
@@ -286,7 +628,6 @@
                 padding-right: 8px !important;
 
                 display: inline-flex !important;
-
                 align-items: center !important;
                 justify-content: center !important;
 
@@ -311,21 +652,17 @@
 
             .ks-framequiz-answer:active {
                 transform: scale(0.97);
-
                 filter: brightness(1.18);
             }
 
             .ks-framequiz-answer:focus-visible {
-                outline:
-                    2px solid currentColor;
-
+                outline: 2px solid currentColor;
                 outline-offset: 2px;
             }
 
             #ks-framequiz-portal.ks-locked
             .ks-framequiz-answer {
                 pointer-events: none;
-
                 opacity: 1 !important;
             }
 
@@ -419,7 +756,6 @@
 
                 100% {
                     transform: scale(1);
-
                     filter: none;
 
                     box-shadow:
@@ -458,29 +794,29 @@
     }
 
     // ============================================================
-    // VIDEO HANDLING
+    // VIDEO
     // ============================================================
 
-    /*
-     * Find the video belonging to the current quiz card.
-     *
-     * We start near the native answer buttons and walk upwards
-     * until we find an ancestor containing exactly one video.
-     */
-    function findQuizVideo(anchorElement) {
+    function findQuizVideo(
+        anchorElement,
+    ) {
         let element =
             anchorElement;
 
         while (
             element &&
-            element !== document.body
+            element !==
+                document.body
         ) {
             const videos =
                 element.querySelectorAll(
                     'video',
                 );
 
-            if (videos.length === 1) {
+            if (
+                videos.length ===
+                1
+            ) {
                 return videos[0];
             }
 
@@ -488,29 +824,21 @@
                 element.parentElement;
         }
 
-        /*
-         * Fallback.
-         *
-         * Frame Quiz normally has only one HTML5 video.
-         */
         const videos =
             document.querySelectorAll(
                 'video',
             );
 
-        if (videos.length === 1) {
+        if (
+            videos.length ===
+            1
+        ) {
             return videos[0];
         }
 
         return null;
     }
 
-    /*
-     * Called for every new question.
-     *
-     * The new move should loop normally again while the user
-     * is learning / deciding.
-     */
     function enableVideoLoop(
         anchorElement,
     ) {
@@ -537,9 +865,6 @@
             '',
         );
 
-        /*
-         * Never introduce native video controls.
-         */
         video.controls =
             false;
 
@@ -547,24 +872,10 @@
             'controls',
         );
 
-        /*
-         * Remove our previous ended marker if the same DOM video
-         * element gets reused by ReactPlayer for another move.
-         */
         delete video.dataset
             .ksStopAfterCurrentLoop;
     }
 
-    /*
-     * Called the moment the user clicks an answer.
-     *
-     * IMPORTANT:
-     *
-     * We DO NOT pause.
-     *
-     * We only disable looping, so the current playback continues
-     * naturally until its normal end.
-     */
     function finishCurrentVideoThenStop(
         anchorElement,
     ) {
@@ -580,9 +891,6 @@
         currentQuizVideo =
             video;
 
-        /*
-         * Prevent another loop.
-         */
         video.loop =
             false;
 
@@ -590,9 +898,6 @@
             'loop',
         );
 
-        /*
-         * We do not want browser controls or a play overlay.
-         */
         video.controls =
             false;
 
@@ -604,12 +909,6 @@
             .ksStopAfterCurrentLoop =
             '1';
 
-        /*
-         * If ReactPlayer or another render were to call play()
-         * again after the video reaches its end, force it to stay
-         * on the final frame while this question is still in its
-         * feedback state.
-         */
         video.addEventListener(
             'ended',
             () => {
@@ -635,12 +934,6 @@
                     'controls',
                 );
 
-                /*
-                 * Native HTML5 video normally already stays on
-                 * the last decoded frame after "ended".
-                 *
-                 * pause() simply makes that explicit.
-                 */
                 video.pause();
             },
             {
@@ -649,10 +942,6 @@
         );
     }
 
-    /*
-     * During the feedback phase, make sure nothing accidentally
-     * restores loop=true on the OLD video.
-     */
     function enforceStoppedVideoLoop() {
         if (
             !answerInProgress ||
@@ -672,33 +961,23 @@
             return;
         }
 
-        if (currentQuizVideo.loop) {
-            currentQuizVideo.loop =
-                false;
-        }
+        currentQuizVideo.loop =
+            false;
 
-        if (
-            currentQuizVideo.hasAttribute(
-                'loop',
-            )
-        ) {
-            currentQuizVideo.removeAttribute(
-                'loop',
-            );
-        }
+        currentQuizVideo.removeAttribute(
+            'loop',
+        );
 
-        if (currentQuizVideo.controls) {
-            currentQuizVideo.controls =
-                false;
+        currentQuizVideo.controls =
+            false;
 
-            currentQuizVideo.removeAttribute(
-                'controls',
-            );
-        }
+        currentQuizVideo.removeAttribute(
+            'controls',
+        );
     }
 
     // ============================================================
-    // SAFE FRAME OPTIONS
+    // SAFE FRAME MODES
     // ============================================================
 
     function getSafeOptions() {
@@ -710,52 +989,62 @@
                 {
                     label: '0',
                     isCorrect:
-                        value => value === 0,
+                        value =>
+                            value === 0,
                 },
                 {
                     label: '-1',
                     isCorrect:
-                        value => value === -1,
+                        value =>
+                            value === -1,
                 },
                 {
                     label: '-2',
                     isCorrect:
-                        value => value === -2,
+                        value =>
+                            value === -2,
                 },
                 {
                     label: '-3',
                     isCorrect:
-                        value => value === -3,
+                        value =>
+                            value === -3,
                 },
                 {
                     label: '-4',
                     isCorrect:
-                        value => value === -4,
+                        value =>
+                            value === -4,
                 },
                 {
                     label: '-5',
                     isCorrect:
-                        value => value === -5,
+                        value =>
+                            value === -5,
                 },
                 {
                     label: '-6',
                     isCorrect:
-                        value => value === -6,
+                        value =>
+                            value === -6,
                 },
                 {
                     label: '-7',
                     isCorrect:
-                        value => value === -7,
+                        value =>
+                            value === -7,
                 },
                 {
                     label: '-8',
                     isCorrect:
-                        value => value === -8,
+                        value =>
+                            value === -8,
                 },
                 {
                     label: '-9',
                     isCorrect:
-                        value => value === -9,
+                        value =>
+                            value === -9,
                 },
             ];
         }
@@ -766,15 +1055,18 @@
         ) {
             return [
                 {
-                    label: '0 to -4',
+                    label:
+                        '0 to -4',
 
                     isCorrect:
                         value =>
                             value <= 0 &&
                             value >= -4,
                 },
+
                 {
-                    label: '-5 to -9',
+                    label:
+                        '-5 to -9',
 
                     isCorrect:
                         value =>
@@ -786,7 +1078,8 @@
 
         return [
             {
-                label: '0 to -9',
+                label:
+                    '0 to -9',
 
                 isCorrect:
                     value =>
@@ -799,7 +1092,8 @@
     function getAnswerOptions() {
         return [
             {
-                label: '+1 or more',
+                label:
+                    '+1 or more',
 
                 isCorrect:
                     value =>
@@ -809,49 +1103,62 @@
             ...getSafeOptions(),
 
             {
-                label: '-10',
+                label:
+                    '-10',
 
                 isCorrect:
                     value =>
                         value === -10,
             },
+
             {
-                label: '-11',
+                label:
+                    '-11',
 
                 isCorrect:
                     value =>
                         value === -11,
             },
+
             {
-                label: '-12',
+                label:
+                    '-12',
 
                 isCorrect:
                     value =>
                         value === -12,
             },
+
             {
-                label: '-13',
+                label:
+                    '-13',
 
                 isCorrect:
                     value =>
                         value === -13,
             },
+
             {
-                label: '-14',
+                label:
+                    '-14',
 
                 isCorrect:
                     value =>
                         value === -14,
             },
+
             {
-                label: '-15',
+                label:
+                    '-15',
 
                 isCorrect:
                     value =>
                         value === -15,
             },
+
             {
-                label: '-16 or worse',
+                label:
+                    '-16 or worse',
 
                 isCorrect:
                     value =>
@@ -861,10 +1168,12 @@
     }
 
     // ============================================================
-    // REACT QUESTION READING
+    // REACT HELPERS
     // ============================================================
 
-    function getReactFiber(element) {
+    function getReactFiber(
+        element,
+    ) {
         if (!element) {
             return null;
         }
@@ -893,7 +1202,9 @@
         element,
     ) {
         let fiber =
-            getReactFiber(element);
+            getReactFiber(
+                element,
+            );
 
         while (fiber) {
             const question =
@@ -902,7 +1213,8 @@
 
             if (
                 question &&
-                typeof question.blockValue ===
+                typeof question
+                    .blockValue ===
                     'number' &&
                 question.move
             ) {
@@ -916,23 +1228,192 @@
         return null;
     }
 
+    function getMoveFromReact(
+        element,
+    ) {
+        let fiber =
+            getReactFiber(
+                element,
+            );
+
+        while (fiber) {
+            const move =
+                fiber.memoizedProps
+                    ?.move;
+
+            if (
+                move &&
+                typeof move ===
+                    'object' &&
+                typeof move.command ===
+                    'string' &&
+                typeof move.block ===
+                    'string'
+            ) {
+                return move;
+            }
+
+            fiber =
+                fiber.return;
+        }
+
+        return null;
+    }
+
+    // ============================================================
+    // FRAME PARSING
+    // ============================================================
+
+    function parseBlockValue(
+        block,
+    ) {
+        const direct =
+            Number.parseInt(
+                block,
+                10,
+            );
+
+        if (
+            !Number.isNaN(
+                direct,
+            )
+        ) {
+            return direct;
+        }
+
+        const simplified =
+            (
+                block.match(
+                    /i?[+-]?\d+/,
+                )?.[0] ||
+                ''
+            ).replace(
+                /^i/i,
+                '',
+            );
+
+        const parsed =
+            Number.parseInt(
+                simplified,
+                10,
+            );
+
+        return Number.isNaN(
+            parsed,
+        )
+            ? null
+            : parsed;
+    }
+
+    function getMoveId(
+        move,
+    ) {
+        return (
+            move.wavuId ||
+            `${move.moveNumber}-${move.command}`
+        );
+    }
+
+    // ============================================================
+    // CURRENT QUESTION
+    // ============================================================
+
+    function getQuestionContext(
+        anchorElement,
+    ) {
+        /*
+         * Frame Quiz exposes a question prop directly.
+         */
+        const directQuestion =
+            getQuestionFromReact(
+                anchorElement,
+            );
+
+        if (
+            directQuestion &&
+            typeof directQuestion
+                .blockValue ===
+                'number'
+        ) {
+            return directQuestion;
+        }
+
+        /*
+         * Daily Challenge renders MoveVideo as a sibling rather
+         * than passing question into the answer button tree.
+         *
+         * Read the current Move from MoveVideo's React props.
+         */
+        const video =
+            findQuizVideo(
+                anchorElement,
+            );
+
+        if (!video) {
+            return null;
+        }
+
+        const move =
+            getMoveFromReact(
+                video,
+            );
+
+        if (!move) {
+            return null;
+        }
+
+        const blockValue =
+            parseBlockValue(
+                move.block ||
+                '',
+            );
+
+        if (
+            blockValue ===
+            null
+        ) {
+            return null;
+        }
+
+        return {
+            id:
+                getMoveId(
+                    move,
+                ),
+
+            move,
+
+            blockValue,
+        };
+    }
+
     function getQuestionKey(
         question,
     ) {
         return [
-            question?.id || '',
-            question?.move?.command || '',
-            question?.blockValue ?? '',
-            question?.move?.video || '',
-        ].join('|');
+            question?.id ||
+                '',
+            question?.move
+                ?.command ||
+                '',
+            question?.blockValue ??
+                '',
+            question?.move
+                ?.video ||
+                '',
+        ].join(
+            '|',
+        );
     }
 
     // ============================================================
-    // FIND ORIGINAL ANSWER BUTTONS
+    // FIND NATIVE ANSWERS
     // ============================================================
 
     function findNativeAnswerGroups() {
-        if (!isFrameQuizRoute()) {
+        if (
+            !isSupportedQuizRoute()
+        ) {
             return [];
         }
 
@@ -966,7 +1447,8 @@
             }
         }
 
-        const groups = [];
+        const groups =
+            [];
 
         for (
             const container of
@@ -994,7 +1476,8 @@
 
             if (
                 buttons.some(
-                    button => !button,
+                    button =>
+                        !button,
                 )
             ) {
                 continue;
@@ -1002,21 +1485,22 @@
 
             groups.push({
                 container,
+
                 buttons,
+
                 slot:
-                    container.parentElement,
+                    container
+                        .parentElement,
             });
         }
 
         return groups;
     }
 
-    // ============================================================
-    // HIDE ORIGINAL BUTTONS
-    // ============================================================
-
     function hideNativeAnswerGroups() {
-        if (!isFrameQuizRoute()) {
+        if (
+            !isSupportedQuizRoute()
+        ) {
             return [];
         }
 
@@ -1026,14 +1510,16 @@
         for (
             const group of groups
         ) {
-            group.container.style
+            group.container
+                .style
                 .setProperty(
                     'visibility',
                     'hidden',
                     'important',
                 );
 
-            group.container.style
+            group.container
+                .style
                 .setProperty(
                     'pointer-events',
                     'none',
@@ -1051,19 +1537,31 @@
     function getNativeBucket(
         blockValue,
     ) {
-        if (blockValue >= 1) {
+        if (
+            blockValue >=
+            1
+        ) {
             return '+1 or more';
         }
 
-        if (blockValue >= -9) {
+        if (
+            blockValue >=
+            -9
+        ) {
             return '0 to -9';
         }
 
-        if (blockValue >= -11) {
+        if (
+            blockValue >=
+            -11
+        ) {
             return '-10 to -11';
         }
 
-        if (blockValue >= -14) {
+        if (
+            blockValue >=
+            -14
+        ) {
             return '-12 to -14';
         }
 
@@ -1079,7 +1577,9 @@
     ) {
         if (
             !slot ||
-            slotStyles.has(slot)
+            slotStyles.has(
+                slot,
+            )
         ) {
             return;
         }
@@ -1088,10 +1588,12 @@
             slot,
             {
                 minHeight:
-                    slot.style.minHeight,
+                    slot.style
+                        .minHeight,
 
                 paddingTop:
-                    slot.style.paddingTop,
+                    slot.style
+                        .paddingTop,
             },
         );
     }
@@ -1104,7 +1606,9 @@
         }
 
         const original =
-            slotStyles.get(slot);
+            slotStyles.get(
+                slot,
+            );
 
         if (!original) {
             return;
@@ -1118,7 +1622,7 @@
     }
 
     // ============================================================
-    // COPY NATIVE BUTTON APPEARANCE
+    // COPY NATIVE BUTTON LOOK
     // ============================================================
 
     function copyNativeButtonLook(
@@ -1130,70 +1634,91 @@
                 source,
             );
 
-        target.style.backgroundColor =
+        target.style
+            .backgroundColor =
             style.backgroundColor;
 
-        target.style.backgroundImage =
+        target.style
+            .backgroundImage =
             style.backgroundImage;
 
         target.style.color =
             style.color;
 
-        target.style.borderTopWidth =
+        target.style
+            .borderTopWidth =
             style.borderTopWidth;
 
-        target.style.borderTopStyle =
+        target.style
+            .borderTopStyle =
             style.borderTopStyle;
 
-        target.style.borderTopColor =
+        target.style
+            .borderTopColor =
             style.borderTopColor;
 
-        target.style.borderRightWidth =
+        target.style
+            .borderRightWidth =
             style.borderRightWidth;
 
-        target.style.borderRightStyle =
+        target.style
+            .borderRightStyle =
             style.borderRightStyle;
 
-        target.style.borderRightColor =
+        target.style
+            .borderRightColor =
             style.borderRightColor;
 
-        target.style.borderBottomWidth =
+        target.style
+            .borderBottomWidth =
             style.borderBottomWidth;
 
-        target.style.borderBottomStyle =
+        target.style
+            .borderBottomStyle =
             style.borderBottomStyle;
 
-        target.style.borderBottomColor =
+        target.style
+            .borderBottomColor =
             style.borderBottomColor;
 
-        target.style.borderLeftWidth =
+        target.style
+            .borderLeftWidth =
             style.borderLeftWidth;
 
-        target.style.borderLeftStyle =
+        target.style
+            .borderLeftStyle =
             style.borderLeftStyle;
 
-        target.style.borderLeftColor =
+        target.style
+            .borderLeftColor =
             style.borderLeftColor;
 
-        target.style.borderRadius =
+        target.style
+            .borderRadius =
             style.borderRadius;
 
-        target.style.boxShadow =
+        target.style
+            .boxShadow =
             style.boxShadow;
 
-        target.style.fontFamily =
+        target.style
+            .fontFamily =
             style.fontFamily;
 
-        target.style.fontSize =
+        target.style
+            .fontSize =
             style.fontSize;
 
-        target.style.fontWeight =
+        target.style
+            .fontWeight =
             style.fontWeight;
 
-        target.style.lineHeight =
+        target.style
+            .lineHeight =
             style.lineHeight;
 
-        target.style.letterSpacing =
+        target.style
+            .letterSpacing =
             style.letterSpacing;
     }
 
@@ -1219,16 +1744,17 @@
         portal.id =
             'ks-framequiz-portal';
 
-        document.body.appendChild(
-            portal,
-        );
+        document.body
+            .appendChild(
+                portal,
+            );
 
         return portal;
     }
 
     function positionPortal() {
         if (
-            !isFrameQuizRoute() ||
+            !isSupportedQuizRoute() ||
             !portal ||
             !currentSlot ||
             !document.contains(
@@ -1256,32 +1782,52 @@
             rect.top >
                 window.innerHeight
         ) {
-            portal.style.visibility =
+            portal.style
+                .visibility =
                 'hidden';
         } else {
-            portal.style.visibility =
+            portal.style
+                .visibility =
                 'visible';
         }
     }
 
+    function hidePortal() {
+        if (portal) {
+            portal.style.display =
+                'none';
+        }
+    }
+
     // ============================================================
-    // SAFE MODE SWITCH
+    // SAFE MODE
     // ============================================================
 
     function cycleSafeMode() {
+        if (
+            answerInProgress
+        ) {
+            return;
+        }
+
         const index =
-            SAFE_MODE_ORDER.indexOf(
-                safeMode,
-            );
+            SAFE_MODE_ORDER
+                .indexOf(
+                    safeMode,
+                );
 
         safeMode =
             SAFE_MODE_ORDER[
-                (index + 1) %
-                SAFE_MODE_ORDER.length
+                (
+                    index +
+                    1
+                ) %
+                SAFE_MODE_ORDER
+                    .length
             ];
 
         localStorage.setItem(
-            STORAGE_KEY,
+            SAFE_MODE_STORAGE_KEY,
             safeMode,
         );
 
@@ -1367,7 +1913,8 @@
         mode.style.padding =
             '0 12px';
 
-        mode.style.borderRadius =
+        mode.style
+            .borderRadius =
             '9999px';
 
         mode.addEventListener(
@@ -1395,41 +1942,49 @@
     }
 
     // ============================================================
-    // CLEAR BUTTON FEEDBACK
+    // BUTTON FEEDBACK
     // ============================================================
 
     function clearSelectedButtonFeedback() {
-        if (!selectedCustomButton) {
+        if (
+            !selectedCustomButton
+        ) {
             return;
         }
 
-        selectedCustomButton.classList.remove(
-            'ks-feedback-active',
-        );
+        selectedCustomButton
+            .classList
+            .remove(
+                'ks-feedback-active',
+            );
 
-        selectedCustomButton.style.removeProperty(
-            '--ks-feedback-bg',
-        );
+        selectedCustomButton
+            .style
+            .removeProperty(
+                '--ks-feedback-bg',
+            );
 
-        selectedCustomButton.style.removeProperty(
-            '--ks-feedback-border',
-        );
+        selectedCustomButton
+            .style
+            .removeProperty(
+                '--ks-feedback-border',
+            );
 
-        selectedCustomButton.style.removeProperty(
-            '--ks-feedback-accent',
-        );
+        selectedCustomButton
+            .style
+            .removeProperty(
+                '--ks-feedback-accent',
+            );
 
-        selectedCustomButton.style.removeProperty(
-            '--ks-feedback-duration',
-        );
+        selectedCustomButton
+            .style
+            .removeProperty(
+                '--ks-feedback-duration',
+            );
 
         selectedCustomButton =
             null;
     }
-
-    // ============================================================
-    // APPLY BANNER COLORS TO SELECTED BUTTON
-    // ============================================================
 
     function applyButtonFeedback(
         feedbackButton,
@@ -1460,7 +2015,8 @@
                 .find(
                     element => {
                         const text =
-                            element.textContent
+                            element
+                                .textContent
                                 ?.trim();
 
                         return (
@@ -1480,39 +2036,54 @@
                 : bannerStyle
                     .borderTopColor;
 
-        selectedCustomButton.style.setProperty(
-            '--ks-feedback-bg',
-            bannerStyle.backgroundColor,
-        );
+        selectedCustomButton
+            .style
+            .setProperty(
+                '--ks-feedback-bg',
+                bannerStyle
+                    .backgroundColor,
+            );
 
-        selectedCustomButton.style.setProperty(
-            '--ks-feedback-border',
-            bannerStyle.borderTopColor,
-        );
+        selectedCustomButton
+            .style
+            .setProperty(
+                '--ks-feedback-border',
+                bannerStyle
+                    .borderTopColor,
+            );
 
-        selectedCustomButton.style.setProperty(
-            '--ks-feedback-accent',
-            accentColor,
-        );
+        selectedCustomButton
+            .style
+            .setProperty(
+                '--ks-feedback-accent',
+                accentColor,
+            );
 
-        selectedCustomButton.style.setProperty(
-            '--ks-feedback-duration',
-            `${duration}ms`,
-        );
+        selectedCustomButton
+            .style
+            .setProperty(
+                '--ks-feedback-duration',
+                `${duration}ms`,
+            );
 
-        selectedCustomButton.classList.remove(
-            'ks-feedback-active',
-        );
+        selectedCustomButton
+            .classList
+            .remove(
+                'ks-feedback-active',
+            );
 
-        void selectedCustomButton.offsetWidth;
+        void selectedCustomButton
+            .offsetWidth;
 
-        selectedCustomButton.classList.add(
-            'ks-feedback-active',
-        );
+        selectedCustomButton
+            .classList
+            .add(
+                'ks-feedback-active',
+            );
     }
 
     // ============================================================
-    // CUSTOM ANSWER BUTTON
+    // ANSWER BUTTON
     // ============================================================
 
     function createAnswerButton(
@@ -1548,7 +2119,7 @@
                 }
 
                 const question =
-                    getQuestionFromReact(
+                    getQuestionContext(
                         nativeButtons[0],
                     );
 
@@ -1575,13 +2146,22 @@
                     button;
 
                 /*
-                 * NEW:
-                 *
-                 * The moment an answer is selected:
-                 *
-                 * - current video keeps playing
-                 * - loop is disabled
-                 * - once it reaches the end, it stays there
+                 * Daily Challenge remembers the REAL answer choice,
+                 * not TekkenDocs' coarse internal bucket.
+                 */
+                if (
+                    isDailyChallengeRoute()
+                ) {
+                    saveDailyExactAnswer(
+                        question,
+                        option.label,
+                        exactCorrect,
+                    );
+                }
+
+                /*
+                 * Let the current move finish once instead of
+                 * starting another loop.
                  */
                 finishCurrentVideoThenStop(
                     nativeButtons[0],
@@ -1595,6 +2175,23 @@
                 let bucketToClick =
                     correctBucket;
 
+                /*
+                 * If our precise answer is incorrect, TekkenDocs
+                 * must receive an incorrect native bucket too.
+                 *
+                 * This keeps its score and Daily Challenge result
+                 * correct even when two precise answers belong to
+                 * the same old coarse category.
+                 *
+                 * Example:
+                 *
+                 * Actual: -12
+                 * User:   -13
+                 *
+                 * TekkenDocs considers both "-12 to -14", but our
+                 * script deliberately submits another native bucket
+                 * so the answer correctly counts as wrong.
+                 */
                 if (
                     !exactCorrect
                 ) {
@@ -1609,7 +2206,8 @@
                 const nativeButton =
                     nativeButtons.find(
                         candidate =>
-                            candidate.textContent
+                            candidate
+                                .textContent
                                 ?.trim() ===
                             bucketToClick,
                     );
@@ -1628,12 +2226,16 @@
                 answerInProgress =
                     true;
 
-                portal?.classList.add(
-                    'ks-locked',
-                );
+                portal?.classList
+                    .add(
+                        'ks-locked',
+                    );
 
                 nativeButton.click();
 
+                /*
+                 * Safety unlock.
+                 */
                 window.setTimeout(
                     () => {
                         if (
@@ -1710,9 +2312,7 @@
         }
 
         /*
-         * A genuinely new question has appeared.
-         *
-         * Its video is allowed to loop again.
+         * New question.
          */
         enableVideoLoop(
             group.buttons[0],
@@ -1724,9 +2324,10 @@
 
         portal.replaceChildren();
 
-        portal.classList.remove(
-            'ks-locked',
-        );
+        portal.classList
+            .remove(
+                'ks-locked',
+            );
 
         const toolbar =
             createToolbar(
@@ -1808,7 +2409,9 @@
                     needed >
                     nativeMinimum
                 ) {
-                    currentSlot.style.minHeight =
+                    currentSlot
+                        .style
+                        .minHeight =
                         `${needed}px`;
                 }
 
@@ -1818,11 +2421,13 @@
     }
 
     // ============================================================
-    // FIND FEEDBACK
+    // FEEDBACK
     // ============================================================
 
     function findFeedbackButton() {
-        if (!isFrameQuizRoute()) {
+        if (
+            !isSupportedQuizRoute()
+        ) {
             return null;
         }
 
@@ -1836,7 +2441,8 @@
                 .find(
                     button => {
                         const text =
-                            button.textContent ||
+                            button
+                                .textContent ||
                             '';
 
                         return (
@@ -1858,17 +2464,9 @@
         );
     }
 
-    // ============================================================
-    // PROCESS FEEDBACK
-    // ============================================================
-
     function processFeedback(
         feedbackButton,
     ) {
-        /*
-         * Ensure the old video remains non-looping throughout
-         * the feedback state.
-         */
         enforceStoppedVideoLoop();
 
         const feedbackRoot =
@@ -1890,11 +2488,17 @@
             positionPortal();
 
             if (portal) {
-                feedbackSlot.style.paddingTop =
+                feedbackSlot
+                    .style
+                    .paddingTop =
                     `${portal.offsetHeight + 12}px`;
             }
         }
 
+        /*
+         * Must be checked before changing anything inside the
+         * feedback card to prevent MutationObserver loops.
+         */
         if (
             processedFeedback.has(
                 feedbackButton,
@@ -1908,7 +2512,8 @@
         );
 
         const feedbackText =
-            feedbackButton.textContent ||
+            feedbackButton
+                .textContent ||
             '';
 
         const isWrong =
@@ -1926,10 +2531,10 @@
             visibleTime,
         );
 
-        // --------------------------------------------------------
-        // Correct "You picked"
-        // --------------------------------------------------------
-
+        /*
+         * Replace TekkenDocs' fake coarse answer with the actual
+         * precise button the user clicked.
+         */
         if (
             isWrong &&
             selectedCustomLabel
@@ -1944,7 +2549,8 @@
                     )
                     .find(
                         element =>
-                            element.textContent
+                            element
+                                .textContent
                                 ?.trim()
                                 .startsWith(
                                     'You picked:',
@@ -1966,7 +2572,7 @@
         }
 
         // --------------------------------------------------------
-        // Hide CONTINUE visual
+        // Hide visual CONTINUE block
         // --------------------------------------------------------
 
         const descendants =
@@ -1982,7 +2588,8 @@
             descendants
         ) {
             if (
-                element.textContent
+                element
+                    .textContent
                     ?.trim() !==
                 'CONTINUE'
             ) {
@@ -2005,15 +2612,16 @@
                     target.parentElement;
             }
 
-            target.style.setProperty(
-                'display',
-                'none',
-                'important',
-            );
+            target.style
+                .setProperty(
+                    'display',
+                    'none',
+                    'important',
+                );
         }
 
         // --------------------------------------------------------
-        // Hide Show move details
+        // Hide "Show move details" during quick feedback
         // --------------------------------------------------------
 
         if (feedbackRoot) {
@@ -2028,11 +2636,12 @@
                     continue;
                 }
 
-                child.style.setProperty(
-                    'display',
-                    'none',
-                    'important',
-                );
+                child.style
+                    .setProperty(
+                        'display',
+                        'none',
+                        'important',
+                    );
             }
         }
 
@@ -2070,10 +2679,109 @@
                         'ks-locked',
                     );
 
+                /*
+                 * The native feedback card itself is TekkenDocs'
+                 * Continue button.
+                 */
                 feedbackButton.click();
             },
             visibleTime,
         );
+    }
+
+    // ============================================================
+    // DAILY START / RETRY
+    // ============================================================
+
+    function handlePageClick(
+        event,
+    ) {
+        if (
+            !isDailyChallengeRoute()
+        ) {
+            return;
+        }
+
+        const target =
+            event.target;
+
+        if (
+            !(target instanceof Element)
+        ) {
+            return;
+        }
+
+        const button =
+            target.closest(
+                'button',
+            );
+
+        if (!button) {
+            return;
+        }
+
+        const text =
+            button
+                .textContent
+                ?.trim();
+
+        /*
+         * A fresh attempt should not reuse the precise answers
+         * from a previous attempt on the same day.
+         */
+        if (
+            text ===
+                'Start challenge' ||
+            text ===
+                'Retry'
+        ) {
+            clearDailyData();
+
+            currentQuestionKey =
+                null;
+
+            currentNativeContainer =
+                null;
+
+            queueProcessPage();
+        }
+    }
+
+    // ============================================================
+    // RESULT / SETUP UI
+    // ============================================================
+
+    function hideQuizUiWithoutClearingDailyData() {
+        clearSelectedButtonFeedback();
+
+        if (currentSlot) {
+            restoreSlot(
+                currentSlot,
+            );
+        }
+
+        if (portal) {
+            portal.style.display =
+                'none';
+        }
+
+        currentSlot =
+            null;
+
+        currentNativeContainer =
+            null;
+
+        currentQuestionKey =
+            null;
+
+        answerInProgress =
+            false;
+
+        selectedCustomLabel =
+            null;
+
+        currentQuizVideo =
+            null;
     }
 
     // ============================================================
@@ -2089,9 +2797,6 @@
             );
         }
 
-        /*
-         * Restore a normal video state when leaving Frame Quiz.
-         */
         if (
             currentQuizVideo &&
             document.contains(
@@ -2101,12 +2806,14 @@
             currentQuizVideo.loop =
                 true;
 
-            currentQuizVideo.setAttribute(
-                'loop',
-                '',
-            );
+            currentQuizVideo
+                .setAttribute(
+                    'loop',
+                    '',
+                );
 
-            delete currentQuizVideo.dataset
+            delete currentQuizVideo
+                .dataset
                 .ksStopAfterCurrentLoop;
         }
 
@@ -2143,7 +2850,9 @@
             return;
         }
 
-        if (!isFrameQuizRoute()) {
+        if (
+            !isSupportedQuizRoute()
+        ) {
             cleanup();
 
             return;
@@ -2154,9 +2863,15 @@
 
         try {
             /*
-             * If an answer is currently active, keep ensuring
-             * that the OLD video cannot loop.
+             * Daily result labels may appear after React finishes
+             * rendering, so check them on every relevant mutation.
              */
+            if (
+                isDailyChallengeRoute()
+            ) {
+                rewriteDailyResults();
+            }
+
             enforceStoppedVideoLoop();
 
             const groups =
@@ -2173,6 +2888,22 @@
                 return;
             }
 
+            /*
+             * Daily Challenge finished:
+             * hide our answer UI but keep the stored precise
+             * choices so the result cards can display them.
+             */
+            if (
+                isDailyChallengeRoute() &&
+                isDailyResultView()
+            ) {
+                hideQuizUiWithoutClearingDailyData();
+
+                rewriteDailyResults();
+
+                return;
+            }
+
             const group =
                 groups[0];
 
@@ -2181,7 +2912,7 @@
             }
 
             const question =
-                getQuestionFromReact(
+                getQuestionContext(
                     group.buttons[0],
                 );
 
@@ -2200,7 +2931,9 @@
     }
 
     function queueProcessPage() {
-        if (processQueued) {
+        if (
+            processQueued
+        ) {
             return;
         }
 
@@ -2231,16 +2964,21 @@
                     handleLocationChange();
                 }
 
-                if (!isFrameQuizRoute()) {
+                if (
+                    !isSupportedQuizRoute()
+                ) {
                     return;
                 }
 
                 hideNativeAnswerGroups();
 
-                /*
-                 * Also protect the video from React restoring loop.
-                 */
                 enforceStoppedVideoLoop();
+
+                if (
+                    isDailyChallengeRoute()
+                ) {
+                    rewriteDailyResults();
+                }
 
                 queueProcessPage();
             },
@@ -2253,7 +2991,9 @@
     function handleKeyDown(
         event,
     ) {
-        if (!isFrameQuizRoute()) {
+        if (
+            !isSupportedQuizRoute()
+        ) {
             return;
         }
 
@@ -2285,13 +3025,15 @@
     }
 
     // ============================================================
-    // POSITION UPDATES
+    // POSITION
     // ============================================================
 
     window.addEventListener(
         'resize',
         () => {
-            if (isFrameQuizRoute()) {
+            if (
+                isSupportedQuizRoute()
+            ) {
                 positionPortal();
             }
         },
@@ -2300,7 +3042,9 @@
     window.addEventListener(
         'scroll',
         () => {
-            if (isFrameQuizRoute()) {
+            if (
+                isSupportedQuizRoute()
+            ) {
                 positionPortal();
             }
         },
@@ -2320,6 +3064,12 @@
     document.addEventListener(
         'keydown',
         handleKeyDown,
+        true,
+    );
+
+    document.addEventListener(
+        'click',
+        handlePageClick,
         true,
     );
 
