@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TekkenDocs Frame Quiz Enhanced
 // @namespace    https://github.com/KominoStyle
-// @version      1.0.1
-// @description  Enhances the TekkenDocs Tekken 8 Frame Quiz with precise block-frame answers, configurable safe-frame ranges and automatic progression.
+// @version      1.0.2
+// @description  Enhances the TekkenDocs Tekken 8 Frame Quiz and Daily Challenge with precise block-frame answers, configurable safe-frame ranges and automatic progression.
 // @namespace    !♥Koͨmͧiͭnͥoͤ Style♥!
 // @license      MIT
 // @homepageURL  https://github.com/KominoStyle/tekkendocs-frame-quiz-enhanced
@@ -51,13 +51,6 @@
         [SAFE_MODES.EXACT]: 'Exact',
     };
 
-    /*
-     * Original TekkenDocs answer buckets.
-     *
-     * These remain alive in the background because TekkenDocs'
-     * own React handlers still control score, streak, Daily
-     * Challenge persistence and progression.
-     */
     const ORIGINAL_LABELS = [
         '+1 or more',
         '0 to -9',
@@ -71,14 +64,11 @@
     // ============================================================
 
     let safeMode =
-        localStorage.getItem(
-            SAFE_MODE_STORAGE_KEY,
-        ) ||
+        localStorage.getItem(SAFE_MODE_STORAGE_KEY) ||
         SAFE_MODES.GROUPED;
 
     if (!SAFE_MODE_ORDER.includes(safeMode)) {
-        safeMode =
-            SAFE_MODES.GROUPED;
+        safeMode = SAFE_MODES.GROUPED;
     }
 
     let portal = null;
@@ -92,19 +82,15 @@
     let selectedCustomLabel = null;
     let selectedCustomButton = null;
 
+    let currentQuizVideo = null;
+
     let processing = false;
     let processQueued = false;
 
-    let lastKnownUrl =
-        location.href;
+    let lastKnownUrl = location.href;
 
-    let currentQuizVideo = null;
-
-    const processedFeedback =
-        new WeakSet();
-
-    const slotStyles =
-        new WeakMap();
+    const processedFeedback = new WeakSet();
+    const slotStyles = new WeakMap();
 
     // ============================================================
     // ROUTES
@@ -129,13 +115,46 @@
         );
     }
 
+    /*
+     * IMPORTANT:
+     *
+     * /t8/framequiz is also the setup screen.
+     *
+     * The actual Endless Quiz is only active when TekkenDocs
+     * adds the "started" query parameter.
+     */
+    function isFrameQuizSessionActive() {
+        if (!isFrameQuizRoute()) {
+            return false;
+        }
+
+        return new URLSearchParams(
+            location.search,
+        ).has('started');
+    }
+
+    function isDailyChallengeSetupView() {
+        if (!isDailyChallengeRoute()) {
+            return false;
+        }
+
+        return Array
+            .from(
+                document.querySelectorAll('button'),
+            )
+            .some(
+                button =>
+                    button.textContent?.trim() ===
+                    'Start challenge',
+            );
+    }
+
     // ============================================================
-    // DAILY CHALLENGE STORAGE
+    // DAILY STORAGE
     // ============================================================
 
     function getLocalDateKey() {
-        const date =
-            new Date();
+        const date = new Date();
 
         const year =
             date.getFullYear();
@@ -191,10 +210,8 @@
 
             if (
                 !parsed ||
-                typeof parsed !==
-                    'object' ||
-                typeof parsed.answers !==
-                    'object'
+                typeof parsed !== 'object' ||
+                typeof parsed.answers !== 'object'
             ) {
                 return getEmptyDailyData();
             }
@@ -218,10 +235,6 @@
         );
     }
 
-    // ============================================================
-    // DAILY QUESTION NUMBER
-    // ============================================================
-
     function getDailyQuestionIndex() {
         if (!isDailyChallengeRoute()) {
             return null;
@@ -229,17 +242,14 @@
 
         const paragraphs =
             Array.from(
-                document.querySelectorAll(
-                    'p',
-                ),
+                document.querySelectorAll('p'),
             );
 
         for (
             const paragraph of paragraphs
         ) {
             const text =
-                paragraph.textContent
-                    ?.trim();
+                paragraph.textContent?.trim();
 
             if (!text) {
                 continue;
@@ -284,11 +294,6 @@
         let index =
             getDailyQuestionIndex();
 
-        /*
-         * Fallback:
-         * if the Question x / 10 text could not be found, try
-         * finding an already-known question with this move ID.
-         */
         if (index === null) {
             const existing =
                 Object.entries(
@@ -301,16 +306,10 @@
 
             if (existing) {
                 index =
-                    Number(
-                        existing[0],
-                    );
+                    Number(existing[0]);
             }
         }
 
-        /*
-         * Last fallback:
-         * choose the first unused answer position.
-         */
         if (
             index === null ||
             !Number.isInteger(index)
@@ -347,32 +346,25 @@
                 question.id,
 
             command:
-                question.move
-                    ?.command ||
-                '',
+                question.move?.command || '',
 
             selectedLabel,
 
             rawBlock:
-                question.move
-                    ?.block ||
+                question.move?.block ||
                 String(
                     question.blockValue,
                 ),
 
             isCorrect:
-                Boolean(
-                    isCorrect,
-                ),
+                Boolean(isCorrect),
         };
 
-        saveDailyData(
-            data,
-        );
+        saveDailyData(data);
     }
 
     // ============================================================
-    // DAILY RESULT REWRITE
+    // DAILY RESULTS
     // ============================================================
 
     function rewriteDailyResults() {
@@ -406,23 +398,12 @@
                 continue;
             }
 
-            /*
-             * AnswerDetailsCard currently renders:
-             *
-             * <p>You picked</p>
-             * <p>-12 to -14</p>
-             *
-             * Replace only the value underneath it.
-             */
             const label =
                 Array.from(
-                    card.querySelectorAll(
-                        'p',
-                    ),
+                    card.querySelectorAll('p'),
                 ).find(
                     element =>
-                        element.textContent
-                            ?.trim() ===
+                        element.textContent?.trim() ===
                         'You picked',
                 );
 
@@ -440,8 +421,7 @@
             }
 
             if (
-                value.textContent
-                    ?.trim() ===
+                value.textContent?.trim() ===
                 storedAnswer.selectedLabel
             ) {
                 continue;
@@ -478,9 +458,25 @@
         lastKnownUrl =
             newUrl;
 
+        /*
+         * FIX:
+         *
+         * Going back from the active Endless Quiz returns to the
+         * same pathname but removes ?started.
+         *
+         * Hide our portal immediately instead of leaving it over
+         * the character-selection screen.
+         */
         if (
-            isSupportedQuizRoute()
+            isFrameQuizRoute() &&
+            !isFrameQuizSessionActive()
         ) {
+            cleanup();
+
+            return;
+        }
+
+        if (isSupportedQuizRoute()) {
             queueProcessPage();
 
             return;
@@ -632,9 +628,7 @@
                 justify-content: center !important;
 
                 white-space: nowrap;
-
                 cursor: pointer;
-
                 opacity: 1 !important;
 
                 transition:
@@ -697,17 +691,13 @@
             @keyframes ks-framequiz-pulse {
                 0% {
                     transform: scale(1);
-
                     box-shadow:
-                        0 0 0 0
-                        transparent;
+                        0 0 0 0 transparent;
                 }
 
                 16% {
                     transform: scale(1.035);
-
-                    filter:
-                        brightness(1.22);
+                    filter: brightness(1.22);
 
                     box-shadow:
                         0 0 0 3px
@@ -726,9 +716,7 @@
 
                 35% {
                     transform: scale(1);
-
-                    filter:
-                        brightness(1.12);
+                    filter: brightness(1.12);
 
                     box-shadow:
                         0 0 12px 2px
@@ -741,9 +729,7 @@
 
                 58% {
                     transform: scale(1.012);
-
-                    filter:
-                        brightness(1.06);
+                    filter: brightness(1.06);
 
                     box-shadow:
                         0 0 7px 1px
@@ -759,8 +745,7 @@
                     filter: none;
 
                     box-shadow:
-                        0 0 0 0
-                        transparent;
+                        0 0 0 0 transparent;
                 }
             }
 
@@ -788,9 +773,7 @@
             }
         `;
 
-        document.head.appendChild(
-            style,
-        );
+        document.head.appendChild(style);
     }
 
     // ============================================================
@@ -805,8 +788,7 @@
 
         while (
             element &&
-            element !==
-                document.body
+            element !== document.body
         ) {
             const videos =
                 element.querySelectorAll(
@@ -814,8 +796,7 @@
                 );
 
             if (
-                videos.length ===
-                1
+                videos.length === 1
             ) {
                 return videos[0];
             }
@@ -830,8 +811,7 @@
             );
 
         if (
-            videos.length ===
-            1
+            videos.length === 1
         ) {
             return videos[0];
         }
@@ -977,7 +957,7 @@
     }
 
     // ============================================================
-    // SAFE FRAME MODES
+    // ANSWER OPTIONS
     // ============================================================
 
     function getSafeOptions() {
@@ -1063,7 +1043,6 @@
                             value <= 0 &&
                             value >= -4,
                 },
-
                 {
                     label:
                         '-5 to -9',
@@ -1260,10 +1239,6 @@
         return null;
     }
 
-    // ============================================================
-    // FRAME PARSING
-    // ============================================================
-
     function parseBlockValue(
         block,
     ) {
@@ -1314,16 +1289,9 @@
         );
     }
 
-    // ============================================================
-    // CURRENT QUESTION
-    // ============================================================
-
     function getQuestionContext(
         anchorElement,
     ) {
-        /*
-         * Frame Quiz exposes a question prop directly.
-         */
         const directQuestion =
             getQuestionFromReact(
                 anchorElement,
@@ -1338,12 +1306,6 @@
             return directQuestion;
         }
 
-        /*
-         * Daily Challenge renders MoveVideo as a sibling rather
-         * than passing question into the answer button tree.
-         *
-         * Read the current Move from MoveVideo's React props.
-         */
         const video =
             findQuizVideo(
                 anchorElement,
@@ -1364,22 +1326,18 @@
 
         const blockValue =
             parseBlockValue(
-                move.block ||
-                '',
+                move.block || '',
             );
 
         if (
-            blockValue ===
-            null
+            blockValue === null
         ) {
             return null;
         }
 
         return {
             id:
-                getMoveId(
-                    move,
-                ),
+                getMoveId(move),
 
             move,
 
@@ -1391,23 +1349,15 @@
         question,
     ) {
         return [
-            question?.id ||
-                '',
-            question?.move
-                ?.command ||
-                '',
-            question?.blockValue ??
-                '',
-            question?.move
-                ?.video ||
-                '',
-        ].join(
-            '|',
-        );
+            question?.id || '',
+            question?.move?.command || '',
+            question?.blockValue ?? '',
+            question?.move?.video || '',
+        ].join('|');
     }
 
     // ============================================================
-    // FIND NATIVE ANSWERS
+    // NATIVE ANSWERS
     // ============================================================
 
     function findNativeAnswerGroups() {
@@ -1428,8 +1378,7 @@
             new Set();
 
         for (
-            const button of
-            allButtons
+            const button of allButtons
         ) {
             const text =
                 button.textContent
@@ -1451,8 +1400,7 @@
             [];
 
         for (
-            const container of
-            containers
+            const container of containers
         ) {
             const directButtons =
                 Array.from(
@@ -1476,8 +1424,7 @@
 
             if (
                 buttons.some(
-                    button =>
-                        !button,
+                    button => !button,
                 )
             ) {
                 continue;
@@ -1489,8 +1436,7 @@
                 buttons,
 
                 slot:
-                    container
-                        .parentElement,
+                    container.parentElement,
             });
         }
 
@@ -1530,37 +1476,29 @@
         return groups;
     }
 
-    // ============================================================
-    // ORIGINAL TEKKENDOCS BUCKET
-    // ============================================================
-
     function getNativeBucket(
         blockValue,
     ) {
         if (
-            blockValue >=
-            1
+            blockValue >= 1
         ) {
             return '+1 or more';
         }
 
         if (
-            blockValue >=
-            -9
+            blockValue >= -9
         ) {
             return '0 to -9';
         }
 
         if (
-            blockValue >=
-            -11
+            blockValue >= -11
         ) {
             return '-10 to -11';
         }
 
         if (
-            blockValue >=
-            -14
+            blockValue >= -14
         ) {
             return '-12 to -14';
         }
@@ -1569,7 +1507,7 @@
     }
 
     // ============================================================
-    // SLOT STYLE
+    // SLOT
     // ============================================================
 
     function rememberSlot(
@@ -1622,7 +1560,7 @@
     }
 
     // ============================================================
-    // COPY NATIVE BUTTON LOOK
+    // BUTTON LOOK
     // ============================================================
 
     function copyNativeButtonLook(
@@ -1634,91 +1572,70 @@
                 source,
             );
 
-        target.style
-            .backgroundColor =
+        target.style.backgroundColor =
             style.backgroundColor;
 
-        target.style
-            .backgroundImage =
+        target.style.backgroundImage =
             style.backgroundImage;
 
         target.style.color =
             style.color;
 
-        target.style
-            .borderTopWidth =
+        target.style.borderTopWidth =
             style.borderTopWidth;
 
-        target.style
-            .borderTopStyle =
+        target.style.borderTopStyle =
             style.borderTopStyle;
 
-        target.style
-            .borderTopColor =
+        target.style.borderTopColor =
             style.borderTopColor;
 
-        target.style
-            .borderRightWidth =
+        target.style.borderRightWidth =
             style.borderRightWidth;
 
-        target.style
-            .borderRightStyle =
+        target.style.borderRightStyle =
             style.borderRightStyle;
 
-        target.style
-            .borderRightColor =
+        target.style.borderRightColor =
             style.borderRightColor;
 
-        target.style
-            .borderBottomWidth =
+        target.style.borderBottomWidth =
             style.borderBottomWidth;
 
-        target.style
-            .borderBottomStyle =
+        target.style.borderBottomStyle =
             style.borderBottomStyle;
 
-        target.style
-            .borderBottomColor =
+        target.style.borderBottomColor =
             style.borderBottomColor;
 
-        target.style
-            .borderLeftWidth =
+        target.style.borderLeftWidth =
             style.borderLeftWidth;
 
-        target.style
-            .borderLeftStyle =
+        target.style.borderLeftStyle =
             style.borderLeftStyle;
 
-        target.style
-            .borderLeftColor =
+        target.style.borderLeftColor =
             style.borderLeftColor;
 
-        target.style
-            .borderRadius =
+        target.style.borderRadius =
             style.borderRadius;
 
-        target.style
-            .boxShadow =
+        target.style.boxShadow =
             style.boxShadow;
 
-        target.style
-            .fontFamily =
+        target.style.fontFamily =
             style.fontFamily;
 
-        target.style
-            .fontSize =
+        target.style.fontSize =
             style.fontSize;
 
-        target.style
-            .fontWeight =
+        target.style.fontWeight =
             style.fontWeight;
 
-        target.style
-            .lineHeight =
+        target.style.lineHeight =
             style.lineHeight;
 
-        target.style
-            .letterSpacing =
+        target.style.letterSpacing =
             style.letterSpacing;
     }
 
@@ -1782,20 +1699,11 @@
             rect.top >
                 window.innerHeight
         ) {
-            portal.style
-                .visibility =
+            portal.style.visibility =
                 'hidden';
         } else {
-            portal.style
-                .visibility =
+            portal.style.visibility =
                 'visible';
-        }
-    }
-
-    function hidePortal() {
-        if (portal) {
-            portal.style.display =
-                'none';
         }
     }
 
@@ -1822,8 +1730,7 @@
                     index +
                     1
                 ) %
-                SAFE_MODE_ORDER
-                    .length
+                SAFE_MODE_ORDER.length
             ];
 
         localStorage.setItem(
@@ -1913,8 +1820,7 @@
         mode.style.padding =
             '0 12px';
 
-        mode.style
-            .borderRadius =
+        mode.style.borderRadius =
             '9999px';
 
         mode.addEventListener(
@@ -1922,27 +1828,17 @@
             cycleSafeMode,
         );
 
-        left.appendChild(
-            info,
-        );
+        left.appendChild(info);
+        left.appendChild(auto);
 
-        left.appendChild(
-            auto,
-        );
-
-        toolbar.appendChild(
-            left,
-        );
-
-        toolbar.appendChild(
-            mode,
-        );
+        toolbar.appendChild(left);
+        toolbar.appendChild(mode);
 
         return toolbar;
     }
 
     // ============================================================
-    // BUTTON FEEDBACK
+    // FEEDBACK BUTTON
     // ============================================================
 
     function clearSelectedButtonFeedback() {
@@ -2145,10 +2041,6 @@
                 selectedCustomButton =
                     button;
 
-                /*
-                 * Daily Challenge remembers the REAL answer choice,
-                 * not TekkenDocs' coarse internal bucket.
-                 */
                 if (
                     isDailyChallengeRoute()
                 ) {
@@ -2159,10 +2051,6 @@
                     );
                 }
 
-                /*
-                 * Let the current move finish once instead of
-                 * starting another loop.
-                 */
                 finishCurrentVideoThenStop(
                     nativeButtons[0],
                 );
@@ -2175,23 +2063,6 @@
                 let bucketToClick =
                     correctBucket;
 
-                /*
-                 * If our precise answer is incorrect, TekkenDocs
-                 * must receive an incorrect native bucket too.
-                 *
-                 * This keeps its score and Daily Challenge result
-                 * correct even when two precise answers belong to
-                 * the same old coarse category.
-                 *
-                 * Example:
-                 *
-                 * Actual: -12
-                 * User:   -13
-                 *
-                 * TekkenDocs considers both "-12 to -14", but our
-                 * script deliberately submits another native bucket
-                 * so the answer correctly counts as wrong.
-                 */
                 if (
                     !exactCorrect
                 ) {
@@ -2233,9 +2104,6 @@
 
                 nativeButton.click();
 
-                /*
-                 * Safety unlock.
-                 */
                 window.setTimeout(
                     () => {
                         if (
@@ -2265,7 +2133,7 @@
     }
 
     // ============================================================
-    // BUILD UI
+    // BUILD PORTAL
     // ============================================================
 
     function buildPortal(
@@ -2279,13 +2147,8 @@
             return;
         }
 
-        rememberSlot(
-            slot,
-        );
-
-        restoreSlot(
-            slot,
-        );
+        rememberSlot(slot);
+        restoreSlot(slot);
 
         const questionKey =
             getQuestionKey(
@@ -2311,9 +2174,6 @@
             return;
         }
 
-        /*
-         * New question.
-         */
         enableVideoLoop(
             group.buttons[0],
         );
@@ -2495,10 +2355,6 @@
             }
         }
 
-        /*
-         * Must be checked before changing anything inside the
-         * feedback card to prevent MutationObserver loops.
-         */
         if (
             processedFeedback.has(
                 feedbackButton,
@@ -2531,10 +2387,6 @@
             visibleTime,
         );
 
-        /*
-         * Replace TekkenDocs' fake coarse answer with the actual
-         * precise button the user clicked.
-         */
         if (
             isWrong &&
             selectedCustomLabel
@@ -2571,10 +2423,6 @@
             }
         }
 
-        // --------------------------------------------------------
-        // Hide visual CONTINUE block
-        // --------------------------------------------------------
-
         const descendants =
             Array.from(
                 feedbackButton
@@ -2584,8 +2432,7 @@
             );
 
         for (
-            const element of
-            descendants
+            const element of descendants
         ) {
             if (
                 element
@@ -2620,10 +2467,6 @@
                 );
         }
 
-        // --------------------------------------------------------
-        // Hide "Show move details" during quick feedback
-        // --------------------------------------------------------
-
         if (feedbackRoot) {
             for (
                 const child of
@@ -2644,10 +2487,6 @@
                     );
             }
         }
-
-        // --------------------------------------------------------
-        // Auto-next
-        // --------------------------------------------------------
 
         window.setTimeout(
             () => {
@@ -2679,10 +2518,6 @@
                         'ks-locked',
                     );
 
-                /*
-                 * The native feedback card itself is TekkenDocs'
-                 * Continue button.
-                 */
                 feedbackButton.click();
             },
             visibleTime,
@@ -2725,10 +2560,6 @@
                 .textContent
                 ?.trim();
 
-        /*
-         * A fresh attempt should not reuse the precise answers
-         * from a previous attempt on the same day.
-         */
         if (
             text ===
                 'Start challenge' ||
@@ -2748,7 +2579,7 @@
     }
 
     // ============================================================
-    // RESULT / SETUP UI
+    // CLEANUP
     // ============================================================
 
     function hideQuizUiWithoutClearingDailyData() {
@@ -2783,10 +2614,6 @@
         currentQuizVideo =
             null;
     }
-
-    // ============================================================
-    // CLEANUP
-    // ============================================================
 
     function cleanup() {
         clearSelectedButtonFeedback();
@@ -2858,14 +2685,40 @@
             return;
         }
 
+        /*
+         * FIX FOR YOUR SCREENSHOT:
+         *
+         * We are still technically on /t8/framequiz after using
+         * TekkenDocs' back arrow, but the actual quiz is no longer
+         * active.
+         *
+         * Never leave the portal visible on the setup screen.
+         */
+        if (
+            isFrameQuizRoute() &&
+            !isFrameQuizSessionActive()
+        ) {
+            cleanup();
+
+            return;
+        }
+
+        /*
+         * Same protection for the Daily Challenge setup screen.
+         */
+        if (
+            isDailyChallengeRoute() &&
+            isDailyChallengeSetupView()
+        ) {
+            cleanup();
+
+            return;
+        }
+
         processing =
             true;
 
         try {
-            /*
-             * Daily result labels may appear after React finishes
-             * rendering, so check them on every relevant mutation.
-             */
             if (
                 isDailyChallengeRoute()
             ) {
@@ -2888,11 +2741,6 @@
                 return;
             }
 
-            /*
-             * Daily Challenge finished:
-             * hide our answer UI but keep the stored precise
-             * choices so the result cards can display them.
-             */
             if (
                 isDailyChallengeRoute() &&
                 isDailyResultView()
@@ -2951,7 +2799,7 @@
     }
 
     // ============================================================
-    // MUTATION OBSERVER
+    // OBSERVER
     // ============================================================
 
     const observer =
@@ -2967,6 +2815,19 @@
                 if (
                     !isSupportedQuizRoute()
                 ) {
+                    return;
+                }
+
+                /*
+                 * If Back removed ?started, hide our overlay
+                 * immediately before doing anything else.
+                 */
+                if (
+                    isFrameQuizRoute() &&
+                    !isFrameQuizSessionActive()
+                ) {
+                    cleanup();
+
                     return;
                 }
 
@@ -2993,6 +2854,16 @@
     ) {
         if (
             !isSupportedQuizRoute()
+        ) {
+            return;
+        }
+
+        /*
+         * Do not switch modes on the Frame Quiz setup screen.
+         */
+        if (
+            isFrameQuizRoute() &&
+            !isFrameQuizSessionActive()
         ) {
             return;
         }
